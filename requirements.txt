@@ -4,4 +4,4 @@ pandas>=2.0
 numpy>=1.26
 statsmodels>=0.14
 plotly>=5.20
-timesfm>=3.0.0,<4
+timesfm[torch]>=3.0.0,<4

@@ -78,13 +78,20 @@ def _reconstruct_price(components_sum: np.ndarray, close: pd.Series, mode: str) 
 
 @st.cache_resource(show_spinner=False)
 def load_timesfm_model():
-    """Load TimesFM 2.5 once per session. Returns None if unavailable."""
-    try:
-        import timesfm  # noqa: WPS433
+    """Load TimesFM 2.5 once per session. Returns None if unavailable.
 
-        model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(TIMESFM_REPO)
+    In timesfm 3.0.x the torch model class isn't re-exported at the package
+    root — it has to be imported from the submodule directly. Same for the
+    ForecastConfig, though that one IS at the root; kept the submodule
+    import path explicit to make failure modes easier to diagnose.
+    """
+    try:
+        from timesfm.configs import ForecastConfig  # noqa: WPS433
+        from timesfm.timesfm_2p5.timesfm_2p5_torch import TimesFM_2p5_200M_torch  # noqa: WPS433
+
+        model = TimesFM_2p5_200M_torch.from_pretrained(TIMESFM_REPO)
         model.compile(
-            timesfm.ForecastConfig(
+            ForecastConfig(
                 max_context=TIMESFM_CONTEXT,
                 max_horizon=TIMESFM_MAX_HORIZON,
                 normalize_inputs=True,

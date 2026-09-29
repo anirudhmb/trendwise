@@ -27,8 +27,18 @@ streamlit run app.py
 - **No persistent cache** — Streamlit Cloud filesystem is ephemeral. We rely on
   `@st.cache_data(ttl=30min)` for in-session caching. For one stock at a time
   the fetch is <2s so this is acceptable.
-- **Single file** — deliberate. The app is small; splitting into modules is
-  premature. Only refactor if it grows past ~500 lines or gains a real backend.
+- **Single file (with one carveout)** — `app.py` holds the UI. Forecasting lives
+  in `forecasting.py` because it owns a heavyweight model lifecycle (TimesFM,
+  ~200M params) that doesn't belong mixed into Streamlit render code. Any further
+  splitting should still clear the ~500 LOC bar per file.
+- **Forecasting: TimesFM (headline) + STL+Holt (baseline)** — TimesFM is loaded
+  once per session via `@st.cache_resource` and gracefully falls back (warning
+  banner, TimesFM controls hidden) if the model can't load — the app must keep
+  working on the baseline alone. The STL baseline extrapolates trend with Holt +
+  seasonal-naive repeat, and must **invert whichever STL transform** was chosen
+  (Price / Log price / Returns) to end up on the price chart in rupees.
+- **No LSTM/Time-LLM in the app** — training loops and 7B checkpoints don't fit
+  the free-tier deploy story. STL+LSTM lives in `notebooks/` as research only.
 - **Custom CSS in `app.py`** — the user picked "custom CSS + hero + cards" over
   plain defaults. Keep the visual polish; don't strip it back to `st.metric`.
 - **STL period = 21 trading days** (~1 month). If changing, update the caption

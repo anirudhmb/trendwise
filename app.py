@@ -23,7 +23,8 @@ APP_DIR = Path(__file__).parent
 UNIVERSE_CSV = APP_DIR / "data" / "nifty500.csv"
 HISTORY_START = "2018-01-01"
 SEASONAL_PERIOD = 21  # ~1 trading month
-FORECAST_TIMESFM_COLOR = "#00d4ff"
+MIN_HISTORY_FOR_RELIABLE_FORECAST = 500  # ~2 years of trading days
+FORECAST_TIMESFM_COLOR = "#f472b6"
 FORECAST_STL_COLOR = "#ffb454"
 
 # ---------------------------------------------------------------------------
@@ -40,13 +41,13 @@ st.set_page_config(
 CSS = """
 <style>
     #MainMenu, footer, header {visibility: hidden;}
-    .block-container {padding-top: 0.6rem; padding-bottom: 1rem; max-width: 1500px;}
+    .block-container {padding-top: 0.2rem; padding-bottom: 1rem; max-width: 1500px;}
 
     .brand {
         display: flex; align-items: baseline; gap: 12px;
-        margin: 0 0 6px 0;
+        margin: 0 0 2px 0;
     }
-    .brand h1 {color: #f8fafc; font-size: 20px; margin: 0; letter-spacing: 0.4px;}
+    .brand h1 {color: #f8fafc; font-size: 18px; margin: 0; letter-spacing: 0.4px;}
     .brand p  {color: #94a3b8; margin: 0; font-size: 12px;}
 
     .card {
@@ -105,17 +106,8 @@ st.markdown(CSS, unsafe_allow_html=True)
 # STL+Holt baseline if TimesFM can't load.
 if "_timesfm_boot_attempted" not in st.session_state:
     st.session_state["_timesfm_boot_attempted"] = True
-    with st.status("Loading TimesFM forecast model (first boot may download ~800MB)…",
-                   expanded=False) as _boot_status:
-        _model = load_timesfm_model()
-        if _model is None:
-            _boot_status.update(
-                label=f"TimesFM unavailable — running with STL+Holt baseline only. "
-                      f"({st.session_state.get('_timesfm_error', 'unknown')[:120]})",
-                state="error",
-            )
-        else:
-            _boot_status.update(label="TimesFM ready.", state="complete")
+    with st.spinner(""):
+        load_timesfm_model()
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +194,7 @@ def _add_forecast_traces(
     show_band: bool,
     anchor_date: pd.Timestamp | None = None,
     anchor_value: float | None = None,
+    low_confidence: bool = False,
 ) -> None:
     """Overlay forecast lines (+ optional TimesFM band) on the price figure.
 
@@ -227,6 +220,7 @@ def _add_forecast_traces(
     for fc in forecasts:
         if fc.method.startswith("TimesFM"):
             color = FORECAST_TIMESFM_COLOR
+            display_name = "Model Foreseer"
             if show_band and fc.lower is not None and fc.upper is not None:
                 lx, ly = _prepend(fc.dates, fc.lower)
                 ux, uy = _prepend(fc.dates, fc.upper)
@@ -235,23 +229,27 @@ def _add_forecast_traces(
                         x=list(ux) + list(lx[::-1]),
                         y=list(uy) + list(ly[::-1]),
                         fill="toself",
-                        fillcolor="rgba(0,212,255,0.15)",
+                        fillcolor="rgba(244,114,182,0.18)",
                         line=dict(color="rgba(0,0,0,0)"),
-                        name="TimesFM p10–p90",
+                        name="Model Foreseer · p10–p90",
                         hoverinfo="skip",
                         showlegend=True,
                     )
                 )
         else:
             color = FORECAST_STL_COLOR
+            display_name = "Model Pulsecast"
 
         x_line, y_line = _prepend(fc.dates, fc.point)
+        line_kwargs = dict(color=color, width=2)
+        if low_confidence:
+            line_kwargs["dash"] = "dash"
         fig.add_trace(
             go.Scatter(
                 x=x_line, y=y_line, mode="lines",
-                name=f"{fc.method} forecast",
-                line=dict(color=color, width=2),
-                hovertemplate="%{x|%d %b %Y}<br><b>₹%{y:,.2f}</b> · " + fc.method + "<extra></extra>",
+                name=f"{display_name} forecast",
+                line=line_kwargs,
+                hovertemplate="%{x|%d %b %Y}<br><b>₹%{y:,.2f}</b> · " + display_name + "<extra></extra>",
             )
         )
 
@@ -261,6 +259,7 @@ def price_chart(
     window: pd.DataFrame,
     forecasts: list[ForecastResult] | None = None,
     show_band: bool = True,
+    low_confidence: bool = False,
 ) -> go.Figure:
     fig = go.Figure()
 
@@ -305,7 +304,7 @@ def price_chart(
 
     anchor_date = window.index[-1] if len(window) else None
     anchor_value = float(window["Close"].iloc[-1]) if len(window) else None
-    _add_forecast_traces(fig, forecasts or [], show_band, anchor_date, anchor_value)
+    _add_forecast_traces(fig, forecasts or [], show_band, anchor_date, anchor_value, low_confidence)
 
     y_candidates_min = [float(window["Close"].min()), lo_52w]
     y_candidates_max = [float(window["Close"].max()), hi_52w]
@@ -328,7 +327,7 @@ def price_chart(
         legend=dict(
             orientation="h",
             yanchor="bottom", y=1.02,
-            xanchor="left", x=0,
+            xanchor="right", x=1.0,
             bgcolor="rgba(17,24,39,0.85)",
             bordercolor="#334155",
             borderwidth=1,
@@ -441,15 +440,11 @@ def seasonal_resid_chart(decomp: pd.DataFrame, mode: str) -> go.Figure:
 # Layout
 # ---------------------------------------------------------------------------
 
-st.markdown(
-    '<div class="brand"><h1>TrendWise</h1>'
-    '<p>NIFTY 500 · STL decomposition · yfinance</p></div>',
-    unsafe_allow_html=True,
-)
+st.markdown('<div class="brand"><h1>TrendWise</h1></div>', unsafe_allow_html=True)
 
 universe = load_universe()
 
-top = st.columns([4, 1, 1, 1], vertical_alignment="bottom")
+top = st.columns([6, 1], vertical_alignment="bottom")
 choice = top[0].selectbox(
     "Stock",
     options=universe["label"],
@@ -457,29 +452,21 @@ choice = top[0].selectbox(
     placeholder="Search a NIFTY 500 stock (e.g. RELIANCE, TCS, INFY)…",
 )
 lookback = top[1].selectbox("Lookback", ["6M", "1Y", "2Y", "3Y", "Max"], index=2)
-stl_mode = top[2].selectbox(
-    "STL input",
-    ["Price", "Log price", "Returns"],
-    index=1,
-    help=(
-        "Price: raw close (multiplicative variance).  "
-        "Log price: additive variance — recommended.  "
-        "Returns: ~stationary daily log-returns, trend becomes drift."
-    ),
-)
-horizon = top[3].number_input(
-    "Forecast (days)", min_value=0, max_value=63, value=21, step=1,
-    help="0 disables forecasting. Max 63 trading days (~3 months).",
-)
-period_map = {"6M": 126, "1Y": 252, "2Y": 504, "3Y": 756, "Max": None}
 
-# TimesFM decomposition mode — controls how TimesFM interacts with STL components.
+# Hardcoded defaults — dropdowns hidden from UI, all forecasting/decomposition
+# machinery below still honours the same variables so nothing else has to change.
+stl_mode = "Log price"
+
+# Kept for reference; the mode picker is no longer rendered but the code paths
+# in forecasting.py still support Raw / Trend / Trend+Resid.
 timesfm_mode_labels = {
     "Raw": "Raw — TimesFM on close prices directly (foundation-model default).",
     "Trend": "Trend — TimesFM on STL trend only; seasonal-naive repeat. Fairest vs STL+Holt.",
     "Trend+Resid": "Trend + Resid — TimesFM on trend and residual; seasonal-naive repeat.",
     "Components": "Components — TimesFM on all three STL components (paper-style).",
 }
+
+period_map = {"6M": 126, "1Y": 252, "2Y": 504, "3Y": 756, "Max": None}
 
 if choice is None:
     st.markdown(
@@ -533,23 +520,14 @@ with st.spinner(f"Running STL on {stl_mode.lower()} ({lookback})…"):
     stl_input = transform_for_stl(close, stl_mode)
     decomp = decompose(stl_input)
 
-# ---- Forecasts (kept out of the render pass so we can toggle without recompute)
+# ---- Forecasts: only computed if the user turns the forecast unit on.
 forecasts: list[ForecastResult] = []
 timesfm_fc: ForecastResult | None = None
 stl_fc: ForecastResult | None = None
 timesfm_error: str | None = None
 
-timesfm_mode = st.session_state.get("timesfm_mode", "Trend")
-
-if horizon > 0:
-    if len(close) >= 100:
-        with st.spinner(f"Forecasting with TimesFM ({timesfm_mode})…"):
-            timesfm_fc = forecast_timesfm(
-                close, decomp, int(horizon), SEASONAL_PERIOD, stl_mode, timesfm_mode,
-            )
-        if timesfm_fc is None:
-            timesfm_error = st.session_state.get("_timesfm_error", "TimesFM unavailable")
-    stl_fc = forecast_stl_classical(decomp, close, int(horizon), SEASONAL_PERIOD, stl_mode)
+timesfm_mode = "Components"  # dropdown hidden; forecasting.py still supports the other modes
+horizon = 0  # set only when forecast is enabled below
 
 # Trend delta over the last 21 sessions — read from the actual STL trend series
 # so the metric card matches whatever the trend chart is showing (Price / Log price / Returns).
@@ -592,30 +570,34 @@ st.caption(f"**{selected['name']}** · {selected['industry']} · `{selected['tic
 left, right = st.columns([3, 2], gap="small")
 
 with left:
-    # Forecast toggles + TimesFM mode picker — only render when a forecast is available.
-    show_timesfm = show_stl = show_band = False
-    if horizon > 0:
-        tcols = st.columns([2, 1.1, 1.4, 1.1, 2])
-        # Mode picker always renders (so users can pick a mode even if the current one failed).
-        tcols[0].selectbox(
-            "TimesFM mode",
-            options=list(timesfm_mode_labels.keys()),
-            format_func=lambda k: {"Raw": "Raw (on close)",
-                                    "Trend": "A · Trend only",
-                                    "Trend+Resid": "B · Trend + Residual",
-                                    "Components": "C · All 3 components"}[k],
-            key="timesfm_mode",
-            help="\n\n".join(f"**{k}** — {v}" for k, v in timesfm_mode_labels.items()),
-            label_visibility="collapsed",
+    # Forecast unit: Off by default. When On, Model + Horizon appear together
+    # and drive computation. Nothing runs while Off.
+    show_timesfm = show_stl = False
+    show_band = False
+    fcols = st.columns([1.2, 2, 2, 3])
+    forecast_on = fcols[0].toggle("Forecast", value=False, key="forecast_on")
+    if forecast_on:
+        model_pick = fcols[1].selectbox(
+            "Model", options=["Model Foreseer", "Model Pulsecast"],
+            index=0, key="forecast_model", label_visibility="collapsed",
         )
-        if timesfm_fc is not None:
-            show_timesfm = tcols[1].checkbox("TimesFM", value=True, key="show_timesfm")
-            show_band = tcols[2].checkbox("Uncertainty band", value=True, key="show_band",
-                                          disabled=not show_timesfm)
-        if stl_fc is not None:
-            show_stl = tcols[3].checkbox("STL + Holt", value=True, key="show_stl")
-        if timesfm_error and timesfm_fc is None:
-            tcols[4].caption(f"⚠️ TimesFM unavailable — {timesfm_error[:80]}")
+        horizon = int(fcols[2].number_input(
+            "Horizon (days)", min_value=5, max_value=63, value=21, step=1,
+            key="forecast_horizon", label_visibility="collapsed",
+        ))
+        if model_pick == "Model Foreseer" and len(close) >= 100:
+            with st.spinner("Forecasting with Model Foreseer…"):
+                timesfm_fc = forecast_timesfm(
+                    close, decomp, horizon, SEASONAL_PERIOD, stl_mode, timesfm_mode,
+                )
+            if timesfm_fc is None:
+                timesfm_error = st.session_state.get("_timesfm_error", "Model Foreseer unavailable")
+                fcols[3].caption(f"⚠️ {timesfm_error[:80]}")
+            show_timesfm = timesfm_fc is not None
+            show_band = show_timesfm
+        elif model_pick == "Model Pulsecast":
+            stl_fc = forecast_stl_classical(decomp, close, horizon, SEASONAL_PERIOD, stl_mode)
+            show_stl = stl_fc is not None
 
     forecasts = []
     if timesfm_fc is not None and show_timesfm:
@@ -623,9 +605,21 @@ with left:
     if stl_fc is not None and show_stl:
         forecasts.append(stl_fc)
 
+    low_confidence = len(prices) < MIN_HISTORY_FOR_RELIABLE_FORECAST
+    if forecast_on and low_confidence and forecasts:
+        st.markdown(
+            f'<div style="background:#3f1d1d;border-left:3px solid #ef4444;'
+            f'border-radius:6px;padding:6px 10px;margin:2px 0 6px 0;'
+            f'color:#fecaca;font-size:12px;">'
+            f'⚠️ Only <b>{len(prices)}</b> trading days of history — forecast is illustrative, '
+            f'treat with caution. Reliable forecasts need ≥ {MIN_HISTORY_FOR_RELIABLE_FORECAST} days.'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
     with st.spinner("Rendering price chart…"):
         st.plotly_chart(
-            price_chart(prices, window, forecasts=forecasts, show_band=show_band),
+            price_chart(prices, window, forecasts=forecasts, show_band=show_band,
+                        low_confidence=low_confidence),
             use_container_width=True,
         )
     with st.spinner("Rendering trend…"):
@@ -679,10 +673,10 @@ if horizon > 0 and (timesfm_fc is not None or stl_fc is not None):
     with st.expander("How to read the forecast"):
         st.markdown(
             """
-- **TimesFM** is Google's pretrained time-series foundation model. It has never seen
-  this specific stock during training — it forecasts purely from the recent price
-  pattern. The shaded band is its own **p10–p90 uncertainty** estimate.
-- **STL + Holt** extrapolates the trend component (Holt's damped linear method) and
+- **Model Foreseer** is a pretrained time-series foundation model applied to the
+  STL components (trend, seasonal, residual) and recombined. The shaded band is
+  its own **p10–p90 uncertainty** estimate.
+- **Model Pulsecast** extrapolates the STL trend (Holt's damped linear method) and
   repeats the last seasonal cycle. It's a transparent, classical baseline — useful
   for sanity-checking the neural forecast.
 - Neither is investment advice. Stock forecasting is genuinely hard; treat these as
